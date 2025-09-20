@@ -2,14 +2,9 @@ from flask import Flask, request, render_template, send_file, jsonify
 import os
 import random
 import string
-import time
-import threading
 from datetime import datetime, timedelta
-import atexit
-import shutil
 import hashlib
 import base64
-import requests
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
@@ -24,11 +19,11 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configuration
-UPLOAD_FOLDER = "uploads"
+UPLOAD_FOLDER = "/tmp/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['MAX_CONTENT_LENGTH'] = 150 * 1024 * 1024  # 150MB limit
 
-# In-memory storage for rate limiting and file data
+# In-memory storage
 rate_limit_data = {}
 failed_attempts_data = {}
 blocked_ips = {}
@@ -43,14 +38,13 @@ MAX_FAILED_ATTEMPTS = 10  # Maximum failed attempts before blocking
 def rate_limit(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        ip = request.remote_addr
-        key = f"rate_limit:{ip}"
+        ip = request.remote_addr or request.headers.get('X-Forwarded-For', '127.0.0.1')
         
         # Check if IP is blocked
         if ip in blocked_ips and blocked_ips[ip] > datetime.now():
             return jsonify({"error": "Too many failed attempts. Please try again later."}), 429
         
-        # Get current request count
+        # Get current request count from memory
         if ip not in rate_limit_data:
             rate_limit_data[ip] = {
                 'count': 1,
@@ -105,26 +99,6 @@ def derive_key(pin):
         backend=default_backend()
     )
     return base64.urlsafe_b64encode(kdf.derive(pin.encode()))
-
-# Cleanup old files (24-hour retention)
-def cleanup_old_files():
-    now = datetime.now()
-    for filename in os.listdir(UPLOAD_FOLDER):
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        try:
-            if os.path.isfile(filepath):
-                file_time = datetime.fromtimestamp(os.path.getmtime(filepath))
-                if now - file_time > timedelta(hours=24):
-                    os.remove(filepath)
-                    for code in list(file_data.keys()):
-                        if file_data[code]['path'] == filepath:
-                            del file_data[code]
-        except Exception as e:
-            logger.error(f"Cleanup error for {filename}: {str(e)}")
-
-# Initialize cleanup
-atexit.register(cleanup_old_files)
-cleanup_old_files()
 
 @app.route("/")
 def upload_form():
@@ -182,7 +156,7 @@ def upload_file():
 def download_file():
     code = request.form.get("code", "").strip()
     key = request.form.get("key", "").strip()
-    ip = request.remote_addr
+    ip = request.remote_addr or request.headers.get('X-Forwarded-For', '127.0.0.1')
 
     if not code or not key:
         return render_template("index.html", error="Both code and key are required")
@@ -231,9 +205,6 @@ def download_file():
         logger.error(f"Download error: {str(e)}")
         return render_template("index.html", error=f"Download failed: {str(e)}")
 
-# Vercel entry point
+# Vercel handler
 def handler(request):
     return app(request.environ, lambda *args: None)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5001, debug=False)
